@@ -1,0 +1,9 @@
+.depend
+*.o
+/jcp/jcp
+.*.swp
+*~
+/release/
+/debug/
+/jcp/Release/
+/jcp/Debug/
