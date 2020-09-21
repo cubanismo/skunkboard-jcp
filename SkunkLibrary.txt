@@ -1,0 +1,242 @@
+; All console functions will delay if buffers are full, 
+; and will time out if they stay full. If the console reconnects
+; then they should resume but previous accesses are lost.
+; If your program *relies* on the console input then it
+; should test skunkConsoleUp after a call.
+;
+; You should not use these functions in your production cartridge,
+; rather create dummy stubs that do nothing or comment the calls out 
+; in your code. Without the Skunkboard they may work, they may not, 
+; there are no guarantees.
+;
+; None of these functions are 'thread safe' so you should resist
+; calling them from interrupts.
+;
+; All addresses must be on a word boundary. All lengths must be
+; even, except text writes may be an odd count (but an even number
+; of bytes are still read and transmitted).
+;
+
+; skunkRESET()
+; Resets the library, marks the console as available, and
+; clears both buffers
+;
+; skunkNOP()
+; No action, no options. Can be useful to start a program
+; with two NOPs to guarantee synchronization of the buffers
+; with the PC console.
+;
+; skunkCONSOLEWRITE(a0)
+; Write text to the console, if it is active
+; a0 - address of the text to be written, terminated with a 0 byte
+; Will write to either buffer, whichever is free first. Note that
+; if the length is not an even number, one additional byte will be
+; sent to the PC, though it should not be printed.
+;
+; skunkCONSOLECLOSE()
+; Instructs the console to close. No arguments.
+; Expects the console is closed after the fact.
+;
+; a0=skunkCONSOLEREAD(d0)
+; Reads text from the console keyboard and returns it at a0,
+; which is a buffer d0 bytes long. The maximum return is 4064 bytes.
+; Note the returned string is NOT necessarily NUL terminated,
+; so you can't just turn around and print it!
+;
+; skunkFILEOPEN(a0,d0)
+; Opens a file on the PC in the current folder (paths are not supported)
+; a0 - points to the filename, terminated with a 0 byte
+; d0 - 0 for write mode. 1 for read mode.
+; This function will wait until the PC acknowledges the buffer
+; to reduce ordering problems.
+;
+; skunkFILEWRITE(a0,d0)
+; Writes a block on the PC to the currently open file (if open to write)
+; a0 - points to the data - will be updated!
+; d0 - number of bytes to write, up to 4060. (must be even)
+; This function will wait until the PC acknowledges the buffer
+; to reduce ordering problems. There's no guarantee of actual write,
+; only that it was sent to the PC.
+;
+; a0=skunkFILEREAD(d0)
+; Reads data from the currently open file (if opened for read)
+; which is a buffer d0 bytes long. The maximum return is 4064 bytes.
+; d0 is updated with the actual number of bytes read. If 0, either
+; EOF or an error occurred. a0 is also updated.
+;
+; skunkFILECLOSE()
+; Instructs the currently open file to close. No arguments.
+;
+
+Sample code blocks
+------------------
+
+----------------------------
+Always reset the library before using it:
+	
+	jsr skunkRESET
+	
+----------------------------
+NOP does nothing useful, but it does wait for the buffers,
+so two NOPs can tell you the PC is responding by checking
+the skunkConsoleUp variable.
+
+	jsr skunkNOP
+	jsr skunkNOP
+	tst.l skunkConsoleUp
+	
+----------------------------
+	
+HELLOWORLD:
+	.dc.b	'Hello, world!',13,0
+	
+	move.l	#HELLOWORLD,a0
+	jsr	skunkCONSOLEWRITE
+	
+----------------------------
+	
+BUFFER:	
+	.ds.b	128
+	
+	move.l	#BUFFER,a0
+	move.l	#128,d0
+	jsr skunkCONSOLEREAD
+
+----------------------------
+
+	.long
+LIONFILE:
+	.dc.b	'ANIMBUF.BIN',0
+
+; Write an 8000 byte buffer to the PC (max block is 4060)
+
+	; open the file
+	move.l	#LIONFILE,a0		; filename
+	move.l	#0,d0				; write mode
+	jsr		skunkFILEOPEN
+	
+	; write an 8k buffer in two pieces
+	move.l	#animbuffer,a0		; buffer
+	move.l	#4000,d0
+	jsr		skunkFILEWRITE		; first 4000 bytes
+	jsr		skunkFILEWRITE		; since a0 was updated, this is the other 4000 bytes
+
+	; close the file
+	jsr		skunkFILECLOSE
+
+----------------------------
+
+	.long
+LIONFILE:
+	.dc.b	'ANIMBUF.BIN',0
+
+; Read an 8000 byte buffer from the PC (max block is 4064)
+
+	; open the file
+	move.l	#LIONFILE,a0		; filename
+	move.l	#1,d0				; read mode
+	jsr		skunkFILEOPEN
+	
+	; read an 8k buffer in two pieces
+	move.l	#animbuffer,a0		; buffer
+	move.l	#4000,d0
+	jsr		skunkFILEREAD		; first 4000 bytes
+	; d0 will be zero here if there was an error
+	tst.l	d0
+	beq		.readfailed
+	; otherwise d0 should still be 4000 - but a real app should check if it matters
+	jsr		skunkFILEREAD		; since a0 was updated, this is the other 4000 bytes
+
+	; close the file
+.readfailed:
+	jsr		skunkFILECLOSE
+
+----------------------------
+
+; (very) hacky BMP reader - 8 bit BMP.. just dump into the animation buffer
+; we can cheat a bit, we know it's 80x100, we'll just read raw 8-bit data
+; Since we can only read 4064 bytes at a time, and we have 8000 bytes, we'll do two
+; reads of 4000 bytes each. Expects that your buffer is being displayed as a
+; 256-color image with an RGB palette.
+	.long
+LIONBMP:
+	.dc.b	'ANIMBUF.BMP',0
+
+	; open the file
+	move.l	#LIONBMP,a0			; filename
+	move.l	#1,d0				; read mode
+	jsr		skunkFILEOPEN
+	
+	; read the header and palette first (many bad assumptions made about values here)
+	; only loads 80x100x8 BMP file, and only if the header is exactly as we assume here.
+	move.l	#animbuffer,a0		; buffer
+	move.l	#$436,d0			; header size with palette for basic 8-bit BMP
+	jsr		skunkFILEREAD		; reads the header and palette
+	; d0 will be zero here if there was an error
+	tst.l	d0
+	beq		.readfailed
+	
+	; copy the palette data to the hardware palette, converting as we go
+	; starts at $36, each entry is 4 bytes - BGR0. We need to convert to
+	; 16-bit RGB: RRRRRBBB BBGGGGGG
+	move.l	#animbuffer+$36,a1
+	move.l	#CLUT,a2
+	move.l	#255,d0
+.pallp:
+	move.l	(a1)+,d1		; BGR0
+	
+	move.l	d1,d2			; get Red
+	andi.l	#$0000FF00,d2
+	lsr.l	#8,d2
+	lsr.l	#3,d2
+	lsl.l	#8,d2
+	lsl.l	#3,d2
+	move.l	d2,d3
+	
+	move.l	d1,d2			; get Green
+	andi.l	#$00FF0000,d2
+	lsr.l	#8,d2
+	lsr.l	#8,d2
+	lsr.l	#2,d2
+	or.l	d2,d3
+	
+	move.l	d1,d2			; get Blue
+	andi.l	#$FF000000,d2
+	lsr.l	#8,d2
+	lsr.l	#8,d2
+	lsr.l	#8,d2
+	lsr.l	#3,d2
+	lsl.l	#6,d2
+	or.l	d2,d3
+	
+	move.w	d3,(a2)+
+	dbra	d0,.pallp
+	
+	; now we should be pointing at the image, so we can just load two 4000 byte blocks
+	move.l	#animbuffer,a0		; buffer
+	move.l	#4000,d0
+	jsr		skunkFILEREAD		; first 4000 bytes
+	; d0 will be zero here if there was an error
+	tst.l	d0
+	beq		.readfailed
+	; otherwise d0 should still be 4000 - but a real app should check if it matters
+	jsr		skunkFILEREAD		; since a0 was updated, this is the other 4000 bytes
+
+	; close the file
+.readfailed:
+	jsr		skunkFILECLOSE
+	
+	; now flip the image so it's right-side up
+	move.l	#animbuffer,a0			; top line
+	move.l	#animbuffer+(99*80),a1	; bottom line
+	move.l	#49,d0					; lines to do -1
+.fliplp:
+	move.l	#19,d1					; 80 pixels on a line
+.linelp:
+	move.l	(a0),d2
+	move.l	(a1),(a0)+
+	move.l	d2,(a1)+
+	dbra	d1,.linelp
+	sub.l	#160,a1
+	dbra	d0,.fliplp
+
